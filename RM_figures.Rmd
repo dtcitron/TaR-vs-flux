@@ -1,0 +1,502 @@
+---
+title: "Tar_Flux_Bioko_Maps"
+author: "Daniel T. Citron"
+date: "12/18/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Load Libraries}
+library(data.table)
+library(rgdal, quietly = TRUE)
+library(ggplot2)
+library(MASS)
+library(rgeos)
+library(latex2exp)
+```
+
+
+# Generate Figures
+In this document, we will generate figures and maps of Bioko Island as an applied example of the Ross-Macdonald model results
+
+We will not do the basic data processing here, but we will generate the figures and compute R0 based on input files generated elsewhere:
+
+## Import data
+```{r Import data, echo=FALSE}
+setwd("/Users/dtcitron/Documents/Publications/TarFlux")
+
+# Reading in the data structures for creating Bioko Island maps:
+bioko <- readOGR("Data/BI_maps/bioko", "bioko_admin1")
+areas_inh <- readOGR("Data/BI_maps/areas_inh", "areas_inh")
+areasf <- fortify(areas_inh, region = "areaId")
+# Some more maps, outlining the 6 on-island destination regions
+ad2 <- rgdal::readOGR("Data/BI_maps/ad2EG/ad2_eg.shp")
+ad2 <- subset(ad2, admin2 %in% c("Malabo", "Riaba", "Luba", "Baney"))
+ad4 <- rgdal::readOGR("Data/BI_maps/admin4shp/admin4V19.shp")
+ad4.sub <- subset(ad4, admin4 %in% c("Ureka", "Moka Malabo"))
+
+# area.data <- fread("Data/BI_maps/areadata.csv") # this is basic survey data, might want to delete later...
+
+# Reading in the fitted travel model results
+# The fitted travel model results come from the multinomial fit for the Spatial Uncertainty project
+travel.model.data <- fread(file = "Data/RM_figures_data.csv")
+# fwrite(travel.model.data[,.(areaId, ad2, malabo, pop, prall_map, pre_map,
+#                      prt_map, prt_map.freq,
+#                      p.off, p.ban, p.lub, p.mal, p.mok, p.ria, p.ure)],
+#        file = "Data/RM_figures_data.csv")
+
+```
+
+## Define Parameters for Ross-Macdonald Model
+These we use to compute the expressions for R0, once we know PR values and the Time at Risk matrix:
+```{r Ross-Macdonald parameters}
+a = 0.3*0.9
+b = 0.55
+c = 0.15
+r = 1./200 # rate at which people become cured
+eta = 1./30 # rate at which prophylaxis wears off
+p = 0.9 # fraction of surviving mosquitoes
+g = 1 - p # fraction of dying mosquitoes
+peip = p^11 # fraction of mosquitoes who survive incubation period
+
+
+# Travel duration, fit using the 2018 data set
+trip.duration.eg <- 1/0.04713604 # rate of return from mainland eg to bioko
+trip.duration.bi <- 1/0.09670302 # rate of return from trips on bioko
+```
+
+
+## Prevalence and population values
+```{r Prevalence and Population Surfaces}
+PR <- travel.model.data$prall_map
+H <- travel.model.data$pop
+
+## Total population
+pop.total <- sum(travel.model.data$pop)#  225950
+## Set Baseline populations in each Area 
+# Baseline Populations in each Area
+pop.inputs <- rep(0, 194 + 1)
+pop.inputs[1:194] <- travel.model.data$pop 
+# assume Bata's population is the same as Malabo's
+pop.inputs[194+1] <- sum(travel.model.data[ad2=="Malabo" | ad2 == "Peri" ]$pop)
+```
+
+
+
+## Time at Risk model R0 calculation
+First, need to calculate the Time at Risk matrix:
+```{r Time at Risk matrix calculation - Part 1}
+# Matrix of probabilities of travel destination
+holder <- as.matrix(travel.model.data[, c("p.off", "p.ban", "p.lub", "p.mal", "p.mok", "p.ria", "p.ure")])
+
+
+# Transform to weight travel probabilities by time at destination
+for (i in 1:194){
+  holder[i,] <- holder[i,]*c(trip.duration.eg,rep(trip.duration.bi,6))
+}
+```
+
+
+```{r Time at Risk destination disambiguation}
+## Define mat.weighted, which we will use to transform the Time at Risk matrix as mapping travel from
+# areaId -> ad2 
+areaIds <- sort(unique(travel.model.data$areaId))
+
+## Set up weighted travel ####
+mat.weighted <- matrix(0, nrow = 7, ncol = 195)
+# off-island travel
+mat.weighted[1,195] <- 1
+# baney
+mat.weighted[2, which(areaIds %in% travel.model.data[ad2=="Baney"]$areaId)] <- travel.model.data[ad2=="Baney"]$pop/sum(travel.model.data[ad2=="Baney"]$pop)
+# luba
+mat.weighted[3, which(areaIds %in% travel.model.data[ad2=="Luba"]$areaId)] <- travel.model.data[ad2=="Luba"]$pop/sum(travel.model.data[ad2=="Luba"]$pop)
+# malabo
+mat.weighted[4, which(areaIds %in% travel.model.data[ad2=="Malabo" | ad2=="Peri"]$areaId)] <- travel.model.data[ad2=="Malabo" | ad2=="Peri"]$pop/sum(travel.model.data[ad2=="Malabo" | ad2=="Peri"]$pop)
+# moka
+mat.weighted[5, which(areaIds %in% travel.model.data[ad2=="Moka"]$areaId)] <- travel.model.data[ad2=="Moka"]$pop/sum(travel.model.data[ad2=="Moka"]$pop)
+# riaba
+mat.weighted[6, which(areaIds %in% travel.model.data[ad2=="Riaba"]$areaId)] <- travel.model.data[ad2=="Riaba"]$pop/sum(travel.model.data[ad2=="Riaba"]$pop)
+# ureka
+mat.weighted[7, which(areaIds %in% travel.model.data[ad2=="Ureka"]$areaId)] <- travel.model.data[ad2=="Ureka"]$pop/sum(travel.model.data[ad2=="Ureka"]$pop)
+
+# Disambiguate travel destination 
+weighted.travel.probabilities <- as.matrix(holder) %*% mat.weighted
+```
+
+```{r Time at Risk matrix calculation, part 2}
+TaR.disambiguated <- diag(1, nrow = 195, ncol = 195)
+for (i in 1:194){
+  TaR.disambiguated[i,] <- weighted.travel.probabilities[i, ]/(sum(weighted.travel.probabilities[i, ]) + travel.model.data$prt_map.freq[i]^(-1))
+  TaR.disambiguated[i,i] <- 1 + TaR.disambiguated[i,i] - sum(weighted.travel.probabilities[i, ]/(sum(weighted.travel.probabilities[i, ]) + travel.model.data$prt_map.freq[i]^(-1)))
+  #   The extra term (here) accounts for the fact that we would otherwise be double-subtracting the probability weight of traveling to one's own map-area
+}
+```
+
+
+Now, we can use the Time at Risk matrix and the PR surface to solve for R0:
+```{r Time at Risk R0}
+# PfPR, with off-island PR = .43 # From Ncogo et al, and from MAP
+pfpr.input <- c(travel.model.data$prall_map, .43)
+# Calculate Kappa, the force of infection from humans to mosquitoes, using the Time at Risk matrix
+kappa <- as.vector(pop.inputs[1:195]*pfpr.input[1:195]) %*% TaR.disambiguated / (as.vector(pop.inputs[1:195]) %*% TaR.disambiguated)
+# Borrowing notation from Ruktanonchai et al.
+d.vec <- (b*c*kappa/(1 + a*c*kappa/g))
+d.x.mat <- matrix(0, nrow = 195, ncol = 195);
+for (i in 1:195){
+  d.x.mat[i,i] = d.vec[i]
+}
+g.x <- r*pfpr.input/(1 - pfpr.input)
+# Calculate Vectorial Capacity by inverting the Time at Risk matrix
+VC.tar <- ginv(TaR.disambiguated %*% d.x.mat) %*% as.vector(g.x)
+# Calculate Time at Risk R0 from vectorial capacity
+R0.tar <- VC.tar[1:195]*b*c/r
+
+#hist(R0.tar[1:194], breaks = seq(0,2,.1), freq = TRUE)
+```
+
+## Flux model R0 calculation
+We can calculate the flux model's coefficients from the Time at Risk model
+```{r Flux model R0}
+tau.travel.times <- c(rep(trip.duration.bi, 194), trip.duration.eg)
+
+# Flux volume matrix:
+M.flux.volume = matrix(0, nrow = 195, ncol = 195)
+for (i in 1:195){
+  for (j in 1:195){
+    M.flux.volume[i,j] = TaR.disambiguated[i,j]*pop.inputs[i]/tau.travel.times[j] +
+                         TaR.disambiguated[j,i]*pop.inputs[j]/tau.travel.times[i]
+  }
+  M.flux.volume[i,i] <- 0
+}
+# Flux rate matrix 
+# divide the ith row, corresponding to starting at the ith location, with the ith pop.star.flux.denom:
+M.flux.rate = matrix(0, nrow = 195, ncol = 195)
+for (i in 1:195){
+  M.flux.rate[i,] <- M.flux.volume[i,]/pop.inputs[i]  
+  M.flux.rate[i,i] <- 0
+}
+
+# Calculate the number of infected individuals at each site
+i.infected = pfpr.input * pop.inputs
+
+# Calculate the net flux out of *infected* individuals (different from all individuals, because pfpr is different everywhere)
+# This is the added input for the R0 calculation
+net.flux.infected <- rep(0, 195)
+for (i in 1:195){
+  net.flux.infected[i] <- - sum(M.flux.rate[i,])*i.infected[i] + (t(M.flux.rate) %*% i.infected)[i]
+  # - (infected people who are leaving) + (infected people who are entering)
+}
+
+# Calculate kappa, for the flux model; which only requires local pfpr measurements
+kappa <- pfpr.input[1:195]
+# Borrowing notation from Ruktanonchai et al.
+d.vec <- (b*c*kappa/(1 + a*c*kappa/g))
+g.x.flux <- t((r*pfpr.input- net.flux.infected/pop.inputs)/(1 - (pfpr.input)))
+# Calculate Vectorial Capacity by inverting the Time at Risk matrix
+VC.flux <- g.x.flux/d.vec
+# Calculate Time at Risk R0 from vectorial capacity
+R0.flux <- VC.flux[1:195]*b*c/r
+
+#hist(R0.flux[1:194], breaks = seq(-70,10,.1), freq = TRUE)
+```
+
+```{r Histograms, for comparison}
+# Write out the histogram-related data; for making a beautiful histogram in the accompanying python notebook
+hist.flux = data.table(model = "Flux", R0 = R0.flux[1:194])#.squeeze[1:194])
+hist.tar = data.table(model = "TaR", R0 = R0.tar[1:194])#.squeeze[1:194])
+#fwrite(rbind(hist.flux, hist.tar), "/Users/dtcitron/Documents/Publications/TarFlux/Data/R0_BI_histo_data.csv")
+
+ggplot() +
+ geom_histogram(data = hist.flux,aes(R0), fill = "Red", alpha = 0.5, bins = 100) +
+ geom_histogram(data = hist.tar,aes(R0), fill = "Blue", alpha = 0.5, bins = 100)
+
+```
+
+## Generate Visualizations
+```{r Discretize R0 distribution for controlling the color gradients}
+# discretize R0 distribution, for controlling color gradient
+R0.tar.discrete <- rep(0, 194)
+# R0.tar.discrete[which(R0.tar[1:194] < .825)] <- 0
+# R0.tar.discrete[which(R0.tar[1:194] > .825 & R0.tar[1:194] < .875)] <- 1
+# R0.tar.discrete[which(R0.tar[1:194] > .875 & R0.tar[1:194] < .925)] <- 2
+# R0.tar.discrete[which(R0.tar[1:194] > .925 & R0.tar[1:194] < .975)] <- 3
+# R0.tar.discrete[which(R0.tar[1:194] > .975 & R0.tar[1:194] < 1.025)] <- 4
+# R0.tar.discrete[which(R0.tar[1:194] > 1.025 & R0.tar[1:194] < 1.075)] <- 5
+# R0.tar.discrete[which(R0.tar[1:194] > 1.075 & R0.tar[1:194] < 1.125)] <- 6
+# R0.tar.discrete[which(R0.tar[1:194] > 1.125 & R0.tar[1:194] < 1.175)] <- 7
+# R0.tar.discrete[which(R0.tar[1:194] > 1.175)] <- 8
+R0.tar.discrete[which(R0.tar[1:194] < .65)] <- 0
+R0.tar.discrete[which(R0.tar[1:194] > .65 & R0.tar[1:194] < .75)] <- 1
+R0.tar.discrete[which(R0.tar[1:194] > .75 & R0.tar[1:194] < .85)] <- 2
+R0.tar.discrete[which(R0.tar[1:194] > .85 & R0.tar[1:194] < .95)] <- 3
+R0.tar.discrete[which(R0.tar[1:194] > .95 & R0.tar[1:194] < 1.05)] <- 4
+R0.tar.discrete[which(R0.tar[1:194] > 1.05 & R0.tar[1:194] < 1.15)] <- 5
+R0.tar.discrete[which(R0.tar[1:194] > 1.15 & R0.tar[1:194] < 1.25)] <- 6
+R0.tar.discrete[which(R0.tar[1:194] > 1.25 & R0.tar[1:194] < 1.35)] <- 7
+R0.tar.discrete[which(R0.tar[1:194] > 1.35)] <- 8
+
+R0.flux.squeeze <- rep(0, 194)
+R0.flux.squeeze[which(R0.flux[1:194] < 0)] = -1
+R0.flux.squeeze[which(R0.flux[1:194] > 0. & R0.flux[1:194] < 0.5)] = 0
+R0.flux.squeeze[which(R0.flux[1:194] > 0.5 & R0.flux[1:194] < 1)] = 1
+R0.flux.squeeze[which(R0.flux[1:194] > 1 & R0.flux[1:194] < 1.5)] = 2
+R0.flux.squeeze[which(R0.flux[1:194] > 1.5 & R0.flux[1:194] < 2.)] = 3
+R0.flux.squeeze[which(R0.flux[1:194] > 2 & R0.flux[1:194] < 2.5)] = 4
+R0.flux.squeeze[which(R0.flux[1:194] > 2.5 & R0.flux[1:194] < 3)] = 5
+R0.flux.squeeze[which(R0.flux[1:194] > 3)] = 6
+#R0.flux.squeeze[which(R0.flux[1:194] > 3.5 )] = 7
+```
+
+Prepare data for plotting
+```{r Prepare Data for plotting }
+plot.data <- merge(travel.model.data, data.table(areaId = areaIds, 
+                                                 R0.tar = R0.tar[1:194],
+                                                 R0.tar.discrete = R0.tar.discrete,
+                                                 R0.flux = R0.flux[1:194],
+                                                 R0.flux.squeeze = R0.flux.squeeze), by = "areaId")
+plot.data = merge(areasf, plot.data, by.x = "id", by.y = "areaId", all=TRUE)
+
+# Here's where we generate the template for making island plots
+p1 = ggplot(data = plot.data, aes(x=long, y=lat, group = group))
+p2 = p1 + geom_polygon(data = bioko, aes(x = long, y = lat, group = group), 
+                       color = "black", fill="grey", size = 0.25)
+p3 = p2 + geom_path(data = ad2) + geom_path(data = ad4.sub)
+```
+
+
+Time at Risk model R0 map - continuous levels
+```{r Time at Risk R0 Discrete Scale}
+map <- p3 + geom_polygon(data = plot.data, aes(x = long, y = lat, group = group, fill = R0.tar), color = NA, size = 0.25) +
+  scale_fill_gradient(name="R0, TaR", low="#D1EFFF", high="#0000D6", limits=c(0,2)) +
+  geom_polygon(data = bioko, aes(x = long, y = lat, group = group), color = "black", fill=NA, size = 0.25) +
+  theme(axis.line=element_blank(),axis.text.x=element_blank(), axis.text.y=element_blank(),axis.ticks=element_blank(),
+        axis.title.x=element_blank(),axis.title.y=element_blank(), panel.background=element_blank(), 
+        legend.position=c(0.2, 0.75), legend.key.size = unit(12, "mm"), 
+        legend.title = element_text(size = 20),
+        legend.text=element_text(size=18))
+map
+```
+
+Time at Risk model R0 map - with discretized color levels for clarity
+```{r Time at Risk R0 Continuous Scale}
+map <- p3 + geom_polygon(data = plot.data, aes(x = long, y = lat, group = group, fill = factor(R0.tar.discrete)), 
+                         color = NA, size = 0.25) +
+  # scale_fill_gradient(name = "R0",
+  #                     low = "#D1EFFF", high = "#0000D6",
+  #                     breaks = c(2, 4, 6), labels = c("0.9", "1", "1.1")) + 
+  scale_fill_manual(name = TeX("$R_{0,ST}"),
+                    breaks = c(8, 7, 6, 5, 4, 3, 2, 1, 0),
+                    values = c("#E5F6FF",
+                               "#C5E4F9",
+                               "#A6CDF4",
+                               "#86B2EF",
+                               "#6994EA",
+                               "#4E73E5",
+                               "#314EE0",
+                               "#1828DB",
+                               "#0000D6"),
+                    labels = c(expression("≥1.35"), "", expression("1.25"), "", expression("1.0"), "",expression("0.75"), "", expression("≤0.65")),
+                    guide = "legend") +
+geom_polygon(data = bioko, aes(x = long, y = lat, group = group), color = "black", fill=NA, size = 0.25) +
+  theme(axis.line=element_blank(),axis.text.x=element_blank(), axis.text.y=element_blank(),axis.ticks=element_blank(),
+        axis.title.x=element_blank(),axis.title.y=element_blank(), panel.background=element_blank(), 
+        legend.position=c(0.175, 0.73), legend.key.size = unit(8, "mm"),#legend.key.size = unit(12, "mm"), 
+        legend.title = element_text(size = 28),
+        legend.text=element_text(size=22))
+map
+# Save this map as a PDF, 7x7in
+```
+
+Flux model R0 map, with a continuous scale
+```{r R0 Flux Continuous}
+map <- p2 + geom_polygon(data = plot.data, aes(x = long, y = lat, group = group, fill = R0.flux), color = NA, size = 0.25) +
+  scale_fill_gradient(name="R0 with flux model", low="yellow", high="red", limits=c(0,4)) +
+  geom_polygon(data = bioko, aes(x = long, y = lat, group = group), color = "black", fill=NA, size = 0.25) +
+  theme(axis.line=element_blank(),axis.text.x=element_blank(), axis.text.y=element_blank(),axis.ticks=element_blank(),
+        axis.title.x=element_blank(),
+        axis.title.y=element_blank(), panel.background=element_blank(), legend.position=c(0.2, 0.8))
+map
+```
+
+
+Flux model R0 map, with discretized color levels for clarity
+```{r R0 Flux Discrete}
+map <- p3 + geom_polygon(data = plot.data, aes(x = long, y = lat, group = group, fill = factor(R0.flux.squeeze)), 
+                         color = NA, size = 0.25) +
+  scale_fill_manual(name = TeX("$R_{0,Flux}"),
+                    breaks = c(6, 5, 4, 3, 2, 1, 0,-1),
+                    values = c("#575655",
+                               "#EAFF00",
+                               "#EAD700", #EDDA00", 
+                               "#EFAF00", #F0B600", 
+                               "#F28500", #F66D00", 
+                               "#F75A00", #F94800", 
+                               "#FC2E00", #FC2400", 
+                               "#FF0000"),
+                    labels = c(expression("≥ 3.0"), " ", "2.0", " ", "1.0", " ", "0.0", expression("≤ 0")),
+                    guide = "legend") +
+  geom_polygon(data = bioko, aes(x = long, y = lat, group = group), color = "black", fill=NA, size = 0.25) +
+    theme(axis.line=element_blank(),axis.text.x=element_blank(), axis.text.y=element_blank(),axis.ticks=element_blank(),
+          axis.title.x=element_blank(),axis.title.y=element_blank(), panel.background=element_blank(), 
+          legend.position=c(0.175, .74), legend.key.size = unit(8, "mm"),#legend.key.size = unit(12, "mm"), 
+          legend.title = element_text(size = 28),
+          legend.text=element_text(size=22))
+map
+# Save this map as a PDF, 7x7in
+```
+
+# Prevalence Map
+```{r R0 Flux Discrete}
+map <- p3 + geom_polygon(data = plot.data, aes(x = long, y = lat, group = group, fill = prall_map), 
+                         color = NA, size = 0.25) +
+  scale_fill_gradient(name="PR",
+                      low="yellow", high="red", limits=c(0, .4)) +
+  geom_polygon(data = bioko, aes(x = long, y = lat, group = group), color = "black", fill=NA, size = 0.25) +
+    theme(axis.line=element_blank(),axis.text.x=element_blank(), axis.text.y=element_blank(),axis.ticks=element_blank(),
+          axis.title.x=element_blank(),axis.title.y=element_blank(), panel.background=element_blank(), 
+          legend.position=c(0.2, 0.75), legend.key.size = unit(10, "mm"),#legend.key.size = unit(12, "mm"), 
+          legend.title = element_text(size = 28),
+          legend.text=element_text(size=22))
+map
+# Save this map as a PDF, 7x7in
+```
+
+# Leaving Home Frequency Map
+```{r}
+require(viridis)
+map <- p3 + geom_polygon(data = plot.data, aes(x = long, y = lat, group = group, fill = prt_map), 
+                         color = NA, size = 0.25) +
+  scale_fill_viridis(name="P(Travel)", limits=c(0, .5)) +
+  geom_polygon(data = bioko, aes(x = long, y = lat, group = group), color = "black", fill=NA, size = 0.25) +
+    theme(axis.line=element_blank(),axis.text.x=element_blank(), axis.text.y=element_blank(),axis.ticks=element_blank(),
+          axis.title.x=element_blank(),axis.title.y=element_blank(), panel.background=element_blank(), 
+          legend.position=c(0.2, 0.75), legend.key.size = unit(10, "mm"),#legend.key.size = unit(12, "mm"), 
+          legend.title = element_text(size = 28),
+          legend.text=element_text(size=22))
+map
+```
+
+
+# Travel patterns maps
+First: find and plot a map of Ad2 + Moka + Ureka?
+Second: Find the centroids of the different regions
+Third: Plot arrows weighted by destination choice?
+
+What are the centroids of these locations?
+```{r}
+dest.xy <- rbind(data.table(ad2 = "Malabo", as.data.table(gCentroid(subset(ad2, admin2 == "Malabo")))),
+  data.table(ad2 = "Baney", as.data.table(gCentroid(subset(ad2, admin2 == "Baney")))),
+  data.table(ad2 = "Luba", as.data.table(gCentroid(subset(ad2, admin2 == "Luba")))),
+  data.table(ad2 = "Riaba", as.data.table(gCentroid(subset(ad2, admin2 == "Riaba")))),
+  data.table(ad2 = "Ureka", as.data.table(gCentroid(subset(ad4, admin4 == "Ureka")))),
+  data.table(ad2 = "Moka", as.data.table(gCentroid(subset(ad4, admin4 == "Moka Malabo"))))
+)
+# Move the centroid of Malabo and for Luba to the northwest, simply for visualization purposes
+dest.xy[ad2 == "Baney"]$x <- 485916
+dest.xy[ad2 == "Baney"]$y <- 410037.2 # aimed at 582
+dest.xy[ad2 == "Malabo"]$x <- 467997.0
+dest.xy[ad2 == "Malabo"]$y <- 410756.0
+dest.xy[ad2 == "Luba"]$x <- 452948.6
+dest.xy[ad2 == "Luba"]$y <- 383201.2 # aimed below 2083
+dest.xy <- rbind(dest.xy, data.table(ad2 = "EG", x = 500000, y = 374834.3))
+```
+
+
+Now we need to figure out the eights on each of these arrows
+```{r}
+dest.xy$weight.335 = unlist(travel.model.data[areaId == 335, .(p.mal, p.ban, p.lub, p.ria, p.ure, p.mok, p.off)])
+dest.xy$weight.1175 = unlist(travel.model.data[areaId == 1175, .(p.mal, p.ban, p.lub, p.ria, p.ure, p.mok, p.off)])
+dest.xy$weight.2496 = unlist(travel.model.data[areaId == 2496, .(p.mal, p.ban, p.lub, p.ria, p.ure, p.mok, p.off)])
+dest.xy$weight.2694 = unlist(travel.model.data[areaId == 2694, .(p.mal, p.ban, p.lub, p.ria, p.ure, p.mok, p.off)])
+```
+
+What are the centroids of location 335, or 2694?
+```{r}
+centroids <- rgdal::readOGR("Data/BI_maps/mapArea_centroids/mapareagrid_centroids.shp")
+centroids <- data.table(areaId = centroids$OBJECTID,# this is the same as areaId
+                        coordinates(centroids)) # lat-long coordinates of the centroids
+centroids[areaId %in% c(335, 1175, 2496, 2694)]
+```
+
+
+```{r}
+map.335 <- p2 + 
+  geom_path(data = ad2) +
+  geom_path(data = ad4.sub) + 
+  #geom_point(data = dest.xy, mapping = aes(x = x, y = y, group = NA)) +
+  geom_curve(aes(x = centroids[areaId == 335]$coords.x1, y = centroids[areaId == 335]$coords.x2, xend = x, yend = y, group = NA, size = weight.335/2), 
+             data = dest.xy, 
+             arrow = arrow(length = unit(0.05, "npc")),
+             curvature = .1) +
+  geom_polygon(data = plot.data[plot.data$id == "335",], aes(x = long, y = lat, group = group, fill = factor(R0.tar.discrete)), color = NA, size = 10) +
+  scale_fill_manual(values = c("#B6D1F9")) + 
+  theme(aspect.ratio = 1, 
+        panel.background = element_rect(fill = "white", colour = "white"),
+        axis.text = element_blank(),
+        axis.title = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = "none")
+map.335
+```
+```{r}
+map.1175 <- p2 + 
+  geom_path(data = ad2) +
+  geom_path(data = ad4.sub) + 
+  #geom_point(data = dest.xy, mapping = aes(x = x, y = y, group = NA)) +
+  geom_curve(aes(x = centroids[areaId == 1175]$coords.x1, y = centroids[areaId == 1175]$coords.x2, xend = x, yend = y, group = NA, size = weight.1175/2), 
+             data = dest.xy, 
+             arrow = arrow(length = unit(0.05, "npc")),
+             curvature = .1) +
+  geom_polygon(data = plot.data[plot.data$id == "1175",], aes(x = long, y = lat, group = group, fill = factor(R0.tar.discrete)), color = NA, size = 10) +
+  scale_fill_manual(values = c("#B6D1F9")) + 
+  theme(aspect.ratio = 1, 
+        panel.background = element_rect(fill = "white", colour = "white"),
+        axis.text = element_blank(),
+        axis.title = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = "none")
+map.1175
+```
+
+```{r}
+map.2496 <- p2 + 
+  geom_path(data = ad2) +
+  geom_path(data = ad4.sub) + 
+  #geom_point(data = dest.xy, mapping = aes(x = x, y = y, group = NA)) +
+  geom_curve(aes(x = centroids[areaId == 2496]$coords.x1, y = centroids[areaId == 2496]$coords.x2, xend = x, yend = y, group = NA, size = weight.2496/2), 
+             data = dest.xy, 
+             arrow = arrow(length = unit(0.05, "npc")),
+             curvature = .1) +
+  geom_polygon(data = plot.data[plot.data$id == "2496",], aes(x = long, y = lat, group = group, fill = factor(R0.tar.discrete)), color = NA, size = 10) +
+  scale_fill_manual(values = c("#B6D1F9")) + 
+  theme(aspect.ratio = 1, 
+        panel.background = element_rect(fill = "white", colour = "white"),
+        axis.text = element_blank(),
+        axis.title = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = "none")
+map.2496
+```
+
+```{r}
+map.2694 <- p2 + 
+  geom_path(data = ad2) +
+  geom_path(data = ad4.sub) + 
+  geom_curve(aes(x = 473923.2, y = 374253.2, xend = x, yend = y, group = NA, size = weight.2694/2), 
+             data = dest.xy, 
+             arrow = arrow(type = "open", length = unit(0.05, "npc")),
+             curvature = .1) +
+  geom_polygon(data = plot.data[plot.data$id == "2694",], aes(x = long, y = lat, group = group, fill = factor(R0.tar.discrete)), color = NA, size = 10) +
+  scale_fill_manual(values = c("#B6D1F9")) + 
+  theme(aspect.ratio = 1, 
+        panel.background = element_rect(fill = "white", colour = "white"),
+        axis.text = element_blank(),
+        axis.title = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = "none")
+map.2694
+```
+
